@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+data/
+*.log
+output.cache
+vless_links.txt
+.DS_Store
+

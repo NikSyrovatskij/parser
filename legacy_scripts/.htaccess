@@ -1,0 +1,24 @@
+```apache
+# 🔒 Запрет прямого доступа к служебным файлам
+<FilesMatch "\.(cache|meta|log|tmp)$">
+    Require all denied
+</FilesMatch>
+
+# Скрыть все файлы, начинающиеся с точки
+<Files ~ "^\.">
+    Require all denied
+</Files>
+<Files ".htaccess">
+    Require all granted
+</Files>
+
+# Запрет листинга директории
+Options -Indexes
+
+# (Опционально) Защита самого скрипта от прямого вызова без параметров
+<Files "happ_converter.php">
+    <If "%{QUERY_STRING} == ''">
+        Require all denied
+    </If>
+</Files>
+```
