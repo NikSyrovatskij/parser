@@ -46,8 +46,9 @@ ssh root@IP_ВАШЕГО_СЕРВЕРА
 
 ```bash
 apt update && apt upgrade -y
-apt install -y curl git
-curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
+apt install -y curl git docker.io docker-compose-v2
+# или если используете официальный скрипт Docker:
+# curl -fsSL https://get.docker.com | sh
 ```
 
 Проверьте, что Docker и Compose установлены:
