@@ -15,6 +15,9 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="📋 Посмотреть ссылки"),
             KeyboardButton(text="🔄 Обновить ссылки"),
         ],
+        [
+            KeyboardButton(text="🦊 Конвертер Sing-Box → VLESS"),
+        ],
     ]
     return ReplyKeyboardMarkup(
         keyboard=kb,
@@ -24,13 +27,36 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-# Кнопка отмены ввода ссылки
+# Кнопка отмены ввода ссылки подписки
 def get_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_input")]
         ]
     )
+
+
+# Кнопка отмены загрузки Sing-Box
+def get_cancel_singbox_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_singbox")]
+        ]
+    )
+
+
+def get_single_link_keyboard(link: str) -> InlineKeyboardMarkup:
+    rows = []
+    if len(link) <= 1024:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📋 Скопировать в буфер",
+                    copy_text=CopyTextButton(text=link),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # Инлайн-клавиатура со списком серверов и пагинацией

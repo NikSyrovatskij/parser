@@ -362,3 +362,147 @@ def generate_singbox_json(servers: List[Dict]) -> str:
 
     return json.dumps(config, indent=2, ensure_ascii=False)
 
+
+def outbound_to_link(ob: Dict) -> Optional[str]:
+    """Конвертирует один outbound Sing-Box в ссылку vless://, hysteria2://, trojan:// или ss://."""
+    if not isinstance(ob, dict):
+        return None
+
+    t = ob.get("type", "").lower()
+    tag = ob.get("tag", "").strip() or f"{t}_{ob.get('server', 'proxy')}"
+    quoted_tag = urllib.parse.quote(tag)
+
+    if t == "vless":
+        uuid = ob.get("uuid") or ob.get("password")
+        server = ob.get("server") or ob.get("server_address")
+        port = ob.get("server_port") or ob.get("port") or 443
+        if not uuid or not server:
+            return None
+
+        params = {"encryption": ob.get("encryption", "none")}
+
+        if "flow" in ob and ob["flow"]:
+            params["flow"] = ob["flow"]
+
+        tr = ob.get("transport") or {}
+        if tr and isinstance(tr, dict):
+            params["type"] = tr.get("type", "tcp")
+            if "path" in tr:
+                params["path"] = tr["path"]
+            if "host" in tr:
+                params["host"] = tr["host"]
+            if "mode" in tr:
+                params["mode"] = tr["mode"]
+        elif "network" in ob:
+            params["type"] = ob["network"]
+
+        tls = ob.get("tls") or {}
+        if isinstance(tls, dict) and (tls.get("enabled") or "reality" in tls or "server_name" in tls):
+            reality = tls.get("reality") or ob.get("reality") or {}
+            if reality and (reality.get("enabled") or "public_key" in reality):
+                params["security"] = "reality"
+                if "public_key" in reality:
+                    params["pbk"] = reality["public_key"]
+                if "short_id" in reality:
+                    params["sid"] = reality["short_id"]
+            else:
+                params["security"] = "tls"
+
+            sni = tls.get("server_name") or ob.get("server_name")
+            if sni:
+                params["sni"] = sni
+
+            utls = tls.get("utls") or {}
+            if isinstance(utls, dict) and "fingerprint" in utls:
+                params["fp"] = utls["fingerprint"]
+            elif "fingerprint" in tls:
+                params["fp"] = tls["fingerprint"]
+
+            alpn = tls.get("alpn")
+            if isinstance(alpn, list):
+                params["alpn"] = ",".join(alpn)
+            elif isinstance(alpn, str):
+                params["alpn"] = alpn
+
+        qs = urllib.parse.urlencode(params)
+        return f"vless://{uuid}@{server}:{port}?{qs}#{quoted_tag}"
+
+    elif t == "hysteria2":
+        pw = ob.get("password") or ob.get("uuid") or ""
+        server = ob.get("server") or ob.get("server_address") or ""
+        port = ob.get("server_port") or ob.get("port") or 443
+        if not server:
+            return None
+
+        tls = ob.get("tls") or {}
+        sni = ""
+        if isinstance(tls, dict):
+            sni = tls.get("server_name", "")
+        if not sni:
+            sni = ob.get("sni") or server
+
+        return f"hysteria2://{pw}@{server}:{port}/?sni={sni}#{quoted_tag}"
+
+    elif t == "trojan":
+        pw = ob.get("password", "")
+        server = ob.get("server") or ""
+        port = ob.get("server_port") or ob.get("port") or 443
+        if not pw or not server:
+            return None
+
+        tls = ob.get("tls") or {}
+        sni = tls.get("server_name", "") if isinstance(tls, dict) else (ob.get("sni") or server)
+        params = {"security": "tls"}
+        if sni:
+            params["sni"] = sni
+        qs = urllib.parse.urlencode(params)
+        return f"trojan://{pw}@{server}:{port}?{qs}#{quoted_tag}"
+
+    elif t == "shadowsocks":
+        method = ob.get("method", "")
+        password = ob.get("password", "")
+        server = ob.get("server", "")
+        port = ob.get("server_port") or ob.get("port") or 8388
+        if not method or not password or not server:
+            return None
+        import base64
+        user_info = base64.b64encode(f"{method}:{password}".encode()).decode()
+        return f"ss://{user_info}@{server}:{port}#{quoted_tag}"
+
+    return None
+
+
+def convert_singbox_json_to_links(data) -> List[Dict[str, str]]:
+    """Принимает Sing-Box конфиг (dict, list или JSON-строку) и возвращает список ссылок с тегами."""
+    if isinstance(data, str):
+        data = json.loads(data)
+
+    outbounds = []
+    if isinstance(data, dict):
+        if "outbounds" in data and isinstance(data["outbounds"], list):
+            outbounds = data["outbounds"]
+        elif "type" in data:
+            outbounds = [data]
+    elif isinstance(data, list):
+        outbounds = data
+
+    results = []
+    for ob in outbounds:
+        if not isinstance(ob, dict):
+            continue
+        ob_type = ob.get("type", "").lower()
+        if ob_type in ("direct", "block", "dns", "selector", "urltest"):
+            continue
+
+        link = outbound_to_link(ob)
+        if link:
+            tag = ob.get("tag", "").strip() or f"{ob_type}_{ob.get('server', 'server')}"
+            results.append({
+                "tag": tag,
+                "proto": ob_type,
+                "link": link,
+            })
+
+    return results
+
+

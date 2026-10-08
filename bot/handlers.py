@@ -11,6 +11,8 @@ from .parser import fetch_and_parse_subscription, clean_subscription_url
 from .keyboards import (
     get_main_menu_keyboard,
     get_cancel_keyboard,
+    get_cancel_singbox_keyboard,
+    get_single_link_keyboard,
     get_servers_inline_keyboard,
     get_server_detail_keyboard,
 )
@@ -22,6 +24,10 @@ router = Router()
 
 class SubscriptionState(StatesGroup):
     waiting_for_url = State()
+
+
+class SingBoxState(StatesGroup):
+    waiting_for_json = State()
 
 
 def get_db(message: Message) -> Database:
@@ -279,7 +285,11 @@ async def callback_download_all(callback: CallbackQuery):
     await callback.answer()
 
 
-from .converters import generate_clash_yaml, generate_singbox_json
+from .converters import (
+    generate_clash_yaml,
+    generate_singbox_json,
+    convert_singbox_json_to_links,
+)
 
 
 # Экспорт конкретного сервера в Clash (YAML)
@@ -375,4 +385,133 @@ async def callback_dl_sb_all(callback: CallbackQuery):
 @router.callback_query(F.data == "noop")
 async def callback_noop(callback: CallbackQuery):
     await callback.answer()
+
+
+# ========================================================
+# Конвертер Sing-Box -> VLESS (из файла или текста)
+# ========================================================
+
+@router.message(F.text == "🦊 Конвертер Sing-Box → VLESS")
+@router.message(Command("singbox2vless"))
+async def prompt_singbox_convert(message: Message, state: FSMContext):
+    await state.set_state(SingBoxState.waiting_for_json)
+    text = (
+        "🦊 <b>Конвертер Sing-Box в VLESS / Hysteria2</b>\n\n"
+        "Отправьте мне конфигурацию Sing-Box:\n"
+        "• 📎 <b>Файлом</b> (с расширением <code>.json</code> или <code>.txt</code>)\n"
+        "• 💬 <b>Или текстом</b> (вставьте JSON-код прямо в чат)\n\n"
+        "<i>Бот извлечет все outbound-серверы и выдаст готовые ссылки.</i>"
+    )
+    await message.answer(text, reply_markup=get_cancel_singbox_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "cancel_singbox")
+async def callback_cancel_singbox(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Конвертация Sing-Box отменена.")
+    await callback.answer()
+
+
+@router.message(SingBoxState.waiting_for_json)
+async def process_singbox_content(message: Message, state: FSMContext):
+    # Обработка текстовой отмены
+    if message.text and message.text.strip().lower() in ("отмена", "❌ отмена", "/cancel"):
+        await state.clear()
+        await message.answer("❌ Конвертация Sing-Box отменена.", reply_markup=get_main_menu_keyboard())
+        return
+
+    raw_text = ""
+    if message.document:
+        if message.document.file_size and message.document.file_size > 15 * 1024 * 1024:
+            await message.answer("❌ Файл слишком большой (максимум 15 МБ).")
+            return
+
+        status_msg = await message.answer("⏳ <i>Скачиваю и обрабатываю файл...</i>", parse_mode="HTML")
+        try:
+            file_io = await message.bot.download(message.document)
+            raw_text = file_io.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Ошибка при чтении файла: {e}")
+            return
+        await status_msg.delete()
+    elif message.text:
+        raw_text = message.text.strip()
+    else:
+        await message.answer(
+            "⚠️ Пожалуйста, отправьте текстовый JSON-файл или текстовое сообщение с кодом.",
+            reply_markup=get_cancel_singbox_keyboard(),
+        )
+        return
+
+    import json
+    try:
+        data = json.loads(raw_text)
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>Ошибка JSON:</b> Не удалось распознать JSON-формат:\n<code>{html.escape(str(e))}</code>\n\n"
+            "Пожалуйста, отправьте корректный JSON-файл или сообщение.",
+            reply_markup=get_cancel_singbox_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        results = convert_singbox_json_to_links(data)
+    except Exception as e:
+        await message.answer(
+            f"❌ Ошибка конвертации: {html.escape(str(e))}",
+            reply_markup=get_cancel_singbox_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if not results:
+        await message.answer(
+            "⚠️ <b>В присланном конфиге не найдено поддерживаемых прокси-серверов.</b>\n\n"
+            "Убедитесь, что в конфиге есть секция <code>outbounds</code> с серверами типа <code>vless</code>, <code>hysteria2</code> или <code>trojan</code>.",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+
+    await state.clear()
+
+    if len(results) == 1:
+        item = results[0]
+        text = (
+            "✅ <b>Сервер успешно сконвертирован в VLESS!</b>\n\n"
+            f"📡 <b>Название:</b> <code>{html.escape(item['tag'])}</code>\n"
+            f"⚙️ <b>Протокол:</b> <code>{html.escape(item['proto'].upper())}</code>\n\n"
+            "👇 <b>Нажмите на блок ниже, чтобы скопировать ссылку:</b>\n"
+            f"<code>{html.escape(item['link'])}</code>"
+        )
+        await message.answer(
+            text,
+            reply_markup=get_single_link_keyboard(item["link"]),
+            parse_mode="HTML",
+        )
+    else:
+        lines_text = []
+        for i, item in enumerate(results[:5], 1):
+            lines_text.append(f"{i}. <b>{html.escape(item['tag'])}</b> (<code>{item['proto'].upper()}</code>)")
+
+        preview = "\n".join(lines_text)
+        if len(results) > 5:
+            preview += f"\n<i>... и ещё {len(results) - 5} серверов</i>"
+
+        text = (
+            f"✅ <b>Успешно сконвертировано серверов: {len(results)}</b>\n\n"
+            f"{preview}\n\n"
+            "📁 <i>Все ссылки сформированы в прикреплённый файл ниже:</i>"
+        )
+        await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+
+        all_links_content = "\n".join(r["link"] for r in results).encode("utf-8")
+        doc = BufferedInputFile(all_links_content, filename="vless_from_singbox.txt")
+        await message.answer_document(
+            document=doc,
+            caption=f"📁 Ссылки VLESS / Hysteria2 ({len(results)} шт.) для импорта в V2RayN, v2rayNG, Streisand",
+        )
+
 
