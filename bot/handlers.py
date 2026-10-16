@@ -6,6 +6,12 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 import html
 
+from .config import (
+    DEFAULT_DEVICE_PROFILE,
+    DEVICE_PRESETS,
+    generate_random_hwid,
+    build_headers_from_profile,
+)
 from .database import Database
 from .parser import fetch_and_parse_subscription, clean_subscription_url
 from .qr import generate_qr_code
@@ -20,6 +26,11 @@ from .keyboards import (
     get_phone_setup_menu_keyboard,
     get_phone_os_keyboard,
     get_phone_app_back_keyboard,
+    get_device_settings_keyboard,
+    get_device_models_keyboard,
+    get_device_action_success_keyboard,
+    get_cancel_hwid_keyboard,
+    get_device_info_back_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +46,10 @@ class SingBoxState(StatesGroup):
     waiting_for_json = State()
 
 
+class DeviceState(StatesGroup):
+    waiting_for_hwid = State()
+
+
 def get_db(message: Message) -> Database:
     return message.bot.db
 
@@ -45,13 +60,14 @@ async def cmd_start(message: Message, state: FSMContext):
     welcome_text = (
         "👋 <b>Добро пожаловать в Happ Subscription Converter Bot!</b>\n\n"
         "Этот бот конвертирует подписки Happ Proxy в готовые ссылки <b>VLESS / Hysteria2</b> "
-        "для приложений V2RayN, V2RayA, Streisand, v2rayNG, Hiddify, NekoBox и других.\n\n"
-        "📌 <b>Возможности:</b>\n"
-        "• <b>📥 Вставить ссылку подписки</b> — спарсить подписку и сохранить\n"
-        "• <b>📋 Посмотреть ссылки</b> — открыть список серверов и скопировать в 1 клик\n"
-        "• <b>📷 QR-коды</b> — мгновенный импорт любого сервера в телефон через камеру\n"
-        "• <b>📱 Настройка телефона</b> — пошаговый мастер подключения для iOS и Android\n"
-        "• <b>🔄 Обновить ссылки</b> — повторно загрузить актуальные серверы\n\n"
+        "для приложений V2RayN, Streisand, v2rayNG, Hiddify, NekoBox и других.\n\n"
+        "📌 <b>Главные функции:</b>\n"
+        "• <b>📥 Вставить ссылку подписки</b> — спарсить защищённую подписку\n"
+        "• <b>📋 Посмотреть ссылки</b> — список серверов и мгновенное копирование\n"
+        "• <b>📷 QR-коды</b> — добавление серверов через камеру телефона\n"
+        "• <b>📱 Настройки телефона и HWID</b> — управление эмуляцией смартфона, смена HWID и моделей устройств\n"
+        "• <b>📖 Как подключить</b> — пошаговый мастер настройки клиентов на iOS и Android\n"
+        "• <b>🔄 Обновить ссылки</b> — загрузить свежие ноды от провайдера\n\n"
         "Выберите действие в меню ниже 👇"
     )
     await message.answer(
@@ -66,15 +82,16 @@ async def cmd_help(message: Message):
     help_text = (
         "📖 <b>Справка по использованию:</b>\n\n"
         "1. Нажмите <b>«📥 Вставить ссылку подписки»</b> и отправьте ссылку вида <code>https://...</code> или <code>happ://add/...</code>\n"
-        "2. Бот автоматически эмулирует клиент, снимет шифрование и выдаст список серверов с кнопками.\n"
-        "3. Нажмите на любой сервер, чтобы скопировать ссылку VLESS/Hysteria или получить <b>📷 QR-код</b> для телефона.\n"
-        "4. Чтобы настроить приложение на смартфоне, нажмите <b>«📱 Настройка телефона»</b>.\n"
-        "5. Чтобы получить все серверы разом, используйте кнопку <b>«📁 Скачать все ссылки (.txt)»</b> под списком.\n\n"
+        "2. Бот автоматически обратится к провайдеру с вашим HWID и профилем устройства, расшифрует подписку и выдаст список серверов.\n"
+        "3. Нажмите на любой сервер, чтобы скопировать ссылку или получить <b>📷 QR-код</b> для телефона.\n"
+        "4. В разделе <b>«📱 Настройки телефона и HWID»</b> вы можете сгенерировать новый HWID (для обхода лимита устройств) или выбрать модель смартфона.\n"
+        "5. В разделе <b>«📖 Как подключить»</b> собраны пошаговые инструкции для iPhone и Android.\n\n"
         "Команды:\n"
         "/start — Главное меню\n"
         "/subscribe — Вставить ссылку\n"
         "/servers — Посмотреть серверы\n"
-        "/phone — Настройка телефона (iOS / Android)\n"
+        "/device — Настройки телефона и HWID\n"
+        "/connect — Инструкция по подключению\n"
         "/refresh — Обновить подписку"
     )
     await message.answer(help_text, parse_mode="HTML")
@@ -112,14 +129,17 @@ async def process_subscription_url(message: Message, state: FSMContext):
 
     status_msg = await message.answer("⏳ <i>Подключаюсь к серверу и парсю подписку...</i>", parse_mode="HTML")
 
+    db: Database = message.bot.db
+    profile = await db.get_user_device_profile(message.from_user.id)
+    headers = build_headers_from_profile(profile)
+
     try:
-        servers, raw_content = await fetch_and_parse_subscription(cleaned_url)
+        servers, raw_content = await fetch_and_parse_subscription(cleaned_url, headers=headers)
     except Exception as e:
         await status_msg.edit_text(f"❌ <b>Ошибка при загрузке:</b>\n{html.escape(str(e))}", parse_mode="HTML")
         return
 
     # Сохраняем в базу данных
-    db: Database = message.bot.db
     await db.save_user_subscription(
         user_id=message.from_user.id,
         subscription_url=cleaned_url,
@@ -131,8 +151,9 @@ async def process_subscription_url(message: Message, state: FSMContext):
     await status_msg.delete()
     success_text = (
         f"✅ <b>Подписка успешно загружена!</b>\n"
-        f"📡 Найдено серверов: <b>{len(servers)}</b>\n\n"
-        "👇 <b>Выберите сервер из списка, чтобы скопировать ссылку:</b>"
+        f"📡 Найдено серверов: <b>{len(servers)}</b>\n"
+        f"📱 Профиль устройства: <b>{html.escape(profile.get('model_name', 'Honor'))}</b> (HWID: <code>{html.escape(profile.get('hwid', '')[:8])}...</code>)\n\n"
+        "👇 <b>Выберите сервер из списка, чтобы скопировать ссылку или получить QR-код:</b>"
     )
     await message.answer(
         success_text,
@@ -184,8 +205,11 @@ async def refresh_servers(message: Message):
     sub_url = user_data["subscription_url"]
     status_msg = await message.answer("⏳ <i>Обновляю подписку от провайдера...</i>", parse_mode="HTML")
 
+    profile = await db.get_user_device_profile(message.from_user.id)
+    headers = build_headers_from_profile(profile)
+
     try:
-        servers, raw_content = await fetch_and_parse_subscription(sub_url)
+        servers, raw_content = await fetch_and_parse_subscription(sub_url, headers=headers)
     except Exception as e:
         await status_msg.edit_text(f"❌ <b>Ошибка при обновлении:</b>\n{html.escape(str(e))}", parse_mode="HTML")
         return
@@ -200,7 +224,8 @@ async def refresh_servers(message: Message):
     await status_msg.delete()
     text = (
         f"🔄 <b>Подписка успешно обновлена!</b>\n"
-        f"📡 Доступно серверов: <b>{len(servers)}</b>\n\n"
+        f"📡 Доступно серверов: <b>{len(servers)}</b>\n"
+        f"📱 Использован HWID: <code>{html.escape(profile.get('hwid', ''))}</code>\n\n"
         "👇 Выберите сервер, чтобы скопировать ссылку:"
     )
     await message.answer(
@@ -354,15 +379,336 @@ async def callback_phone_setup_from_srv(callback: CallbackQuery):
     await callback.answer()
 
 
-# Главное меню настройки телефона из общего меню
+# ----------------------------------------------------
+# Раздел: Настройки устройства и HWID эмуляции
+# ----------------------------------------------------
+
+async def render_device_settings_text(db: Database, user_id: int) -> tuple[str, bool]:
+    profile = await db.get_user_device_profile(user_id)
+    user_sub = await db.get_user_subscription(user_id)
+    has_sub = bool(user_sub and user_sub.get("subscription_url"))
+
+    hwid = html.escape(profile.get("hwid", "74jf74nf8f4jr5je"))
+    model = html.escape(profile.get("model_name", profile.get("model", "Honor Magic 6 Pro")))
+    os_info = html.escape(f"{profile.get('os', 'Android')} {profile.get('ver_os', '15')}")
+    ua = html.escape(profile.get("user_agent", "Sing-box/1.8.29"))
+
+    text = (
+        "📱 <b>Настройки телефона и HWID (эмуляция устройства)</b>\n\n"
+        "Провайдер подписки Happ требует, чтобы запрос к подписке выглядел как официальное мобильное приложение. "
+        "Бот эмулирует смартфон и передаёт серверу провайдера следующие параметры:\n\n"
+        f"🆔 <b>HWID устройства:</b> <code>{hwid}</code>\n"
+        f"📱 <b>Модель смартфона:</b> <code>{model}</code>\n"
+        f"⚙️ <b>Операционная система:</b> <code>{os_info}</code>\n"
+        f"🌐 <b>Формат клиента:</b> <code>{ua}</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>Зачем нужны эти параметры?</b>\n"
+        "• <b>Лимит устройств:</b> провайдер считает устройства по <b>HWID</b>. "
+        "Если у вас закончились слоты (например, ошибка лимита) — нажмите <b>«🎲 Сгенерировать новый HWID»</b>, "
+        "и сервер зарегистрирует абсолютно новый телефон.\n"
+        "• <b>Свой настоящий телефон:</b> если хотите использовать те же параметры, "
+        "что и ваш смартфон (не занимая лишний слот) — нажмите <b>«✏️ Ввести свой HWID»</b>.\n"
+        "• <b>Модель телефона:</b> можно переключить на iPhone 15 Pro, Samsung S24 Ultra или Pixel в 1 клик."
+    )
+    return text, has_sub
+
+
+# Главное меню настроек устройства из меню
+@router.message(F.text == "📱 Настройки телефона и HWID")
+@router.message(Command("device"))
+@router.message(Command("hwid"))
+async def show_device_settings(message: Message, state: FSMContext):
+    await state.clear()
+    db: Database = message.bot.db
+    text, has_sub = await render_device_settings_text(db, message.from_user.id)
+    await message.answer(
+        text,
+        reply_markup=get_device_settings_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+
+
+# Возврат в настройки устройства
+@router.callback_query(F.data == "dev_back")
+async def callback_dev_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    db: Database = callback.bot.db
+    text, has_sub = await render_device_settings_text(db, callback.from_user.id)
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_settings_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Генерация нового случайного HWID
+@router.callback_query(F.data == "dev_gen_hwid")
+async def callback_dev_gen_hwid(callback: CallbackQuery):
+    db: Database = callback.bot.db
+    new_hwid = generate_random_hwid(32)
+    await db.update_user_device_profile(callback.from_user.id, hwid=new_hwid)
+
+    user_sub = await db.get_user_subscription(callback.from_user.id)
+    has_sub = bool(user_sub and user_sub.get("subscription_url"))
+
+    text = (
+        "🎲 <b>Сгенерирован новый уникальный HWID!</b>\n\n"
+        f"🆔 <b>Новый HWID:</b> <code>{new_hwid}</code>\n\n"
+        "✨ <b>Что это даёт:</b>\n"
+        "Бот создал абсолютно новый идентификатор устройства. При следующем запросе сервер провайдера "
+        "определит этот запрос как совершенно новое подключенное устройство (новый телефон).\n\n"
+        "<i>Нажмите кнопку ниже, чтобы обновить подписку прямо сейчас с новым HWID:</i>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_action_success_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+    await callback.answer("Новый HWID успешно сгенерирован!")
+
+
+# Меню выбора модели телефона
+@router.callback_query(F.data == "dev_choose_model")
+async def callback_dev_choose_model(callback: CallbackQuery):
+    text = (
+        "📱 <b>Выберите модель смартфона для эмуляции:</b>\n\n"
+        "Бот будет передавать выбранную модель и версию операционной системы в заголовках к провайдеру.\n\n"
+        "👇 <i>Выберите телефон из списка:</i>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_models_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Сохранение выбранной модели
+@router.callback_query(F.data.startswith("dev_set_model:"))
+async def callback_dev_set_model(callback: CallbackQuery):
+    preset_key = callback.data.split(":", 1)[1]
+    preset = DEVICE_PRESETS.get(preset_key)
+
+    if not preset:
+        await callback.answer("Пресет не найден.", show_alert=True)
+        return
+
+    db: Database = callback.bot.db
+    await db.update_user_device_profile(
+        callback.from_user.id,
+        model=preset["model"],
+        model_name=preset["model_name"],
+        os=preset["os"],
+        ver_os=preset["ver_os"],
+        user_agent=preset["user_agent"],
+        locale=preset["locale"],
+    )
+
+    user_sub = await db.get_user_subscription(callback.from_user.id)
+    has_sub = bool(user_sub and user_sub.get("subscription_url"))
+
+    title = html.escape(preset["title"])
+    text = (
+        f"✅ <b>Модель устройства успешно изменена!</b>\n\n"
+        f"📱 <b>Новый профиль:</b> {title}\n"
+        f"⚙️ <b>Система:</b> <code>{preset['os']} {preset['ver_os']}</code>\n"
+        f"🏷 <b>Код модели:</b> <code>{preset['model']}</code>\n\n"
+        "Теперь бот отправляет серверу подписки эти параметры.\n\n"
+        "<i>Нажмите кнопку ниже, чтобы применить настройки:</i>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_action_success_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+    await callback.answer("Модель смартфона сохранена!")
+
+
+# Запрос ручного ввода HWID
+@router.callback_query(F.data == "dev_input_hwid")
+async def callback_dev_input_hwid(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(DeviceState.waiting_for_hwid)
+    text = (
+        "✏️ <b>Ручной ввод вашего HWID</b>\n\n"
+        "Отправьте сообщением ваш уникальный HWID устройства.\n\n"
+        "📌 <b>Требования:</b>\n"
+        "• Строка из латинских букв и цифр\n"
+        "• Длина от 8 до 64 символов (обычно 16 или 32 символа, например: <code>74jf74nf8f4jr5je</code> или <code>a1b2c3d4e5f6...</code>)\n\n"
+        "<i>Отправьте HWID в чат или нажмите «Отмена»:</i>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_cancel_hwid_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Отмена ввода HWID
+@router.callback_query(F.data == "cancel_hwid_input")
+async def callback_cancel_hwid_input(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    db: Database = callback.bot.db
+    text, has_sub = await render_device_settings_text(db, callback.from_user.id)
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_settings_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+    await callback.answer("Ввод отменён.")
+
+
+# Обработка введённого HWID
+@router.message(DeviceState.waiting_for_hwid)
+async def process_user_hwid(message: Message, state: FSMContext):
+    raw_hwid = message.text.strip()
+
+    if len(raw_hwid) < 6 or len(raw_hwid) > 64 or " " in raw_hwid:
+        await message.answer(
+            "❌ <b>Некорректный формат HWID!</b>\n"
+            "HWID должен быть строкой без пробелов длиной от 6 до 64 символов.\n"
+            "Пожалуйста, отправьте корректный HWID или нажмите кнопку отмены:",
+            reply_markup=get_cancel_hwid_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    db: Database = message.bot.db
+    await db.update_user_device_profile(message.from_user.id, hwid=raw_hwid)
+    await state.clear()
+
+    user_sub = await db.get_user_subscription(message.from_user.id)
+    has_sub = bool(user_sub and user_sub.get("subscription_url"))
+
+    hwid_safe = html.escape(raw_hwid)
+    text = (
+        "✅ <b>Ваш HWID успешно сохранён!</b>\n\n"
+        f"🆔 <b>Текущий HWID:</b> <code>{hwid_safe}</code>\n\n"
+        "Теперь бот отправляет этот идентификатор серверу провайдера.\n\n"
+        "<i>Нажмите кнопку ниже, чтобы обновить подписку с новым HWID:</i>"
+    )
+    await message.answer(
+        text,
+        reply_markup=get_device_action_success_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+
+
+# Справка: как узнать HWID своего смартфона
+@router.callback_query(F.data == "dev_hwid_info")
+async def callback_dev_hwid_info(callback: CallbackQuery):
+    text = (
+        "📖 <b>Как узнать HWID своего смартфона?</b>\n\n"
+        "<b>HWID (Hardware ID)</b> — это уникальный номер, который приложение <b>Happ Proxy</b> "
+        "генерирует на вашем телефоне при первой установке.\n\n"
+        "🔍 <b>Способ 1. В самом приложении Happ:</b>\n"
+        "1. Откройте приложение <b>Happ</b> на смартфоне.\n"
+        "2. Перейдите в <b>Настройки (Settings)</b> → <b>О приложении (About)</b> или проверьте раздел логов/диагностики.\n"
+        "3. Найдите строку <b>Device ID</b> или <b>HWID</b>.\n\n"
+        "🛠 <b>Способ 2. Через перехват запроса (Debug):</b>\n"
+        "В документации проекта есть скрипт <code>debug_headers.php</code>. Если в приложении Happ вставить его адрес "
+        "в поле подписки, приложение при обращении само пришлёт заголовок <code>X-Hwid</code>.\n\n"
+        "💡 <b>Нужно ли обязательно узнавать свой настоящий HWID?</b>\n"
+        "<b>Нет!</b> Самый простой способ — просто нажать кнопку <b>«🎲 Сгенерировать новый HWID»</b>. "
+        "Бот сам создаст валидный случайный номер, и провайдер примет его как отдельный независимый телефон!"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_info_back_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Сброс на дефолтные настройки
+@router.callback_query(F.data == "dev_reset_default")
+async def callback_dev_reset_default(callback: CallbackQuery):
+    db: Database = callback.bot.db
+    await db.update_user_device_profile(
+        callback.from_user.id,
+        hwid=DEFAULT_DEVICE_PROFILE["hwid"],
+        model=DEFAULT_DEVICE_PROFILE["model"],
+        model_name=DEFAULT_DEVICE_PROFILE["model_name"],
+        os=DEFAULT_DEVICE_PROFILE["os"],
+        ver_os=DEFAULT_DEVICE_PROFILE["ver_os"],
+        user_agent=DEFAULT_DEVICE_PROFILE["user_agent"],
+        locale=DEFAULT_DEVICE_PROFILE["locale"],
+    )
+
+    user_sub = await db.get_user_subscription(callback.from_user.id)
+    has_sub = bool(user_sub and user_sub.get("subscription_url"))
+
+    text = (
+        "🔄 <b>Настройки устройства сброшены на стандартные!</b>\n\n"
+        f"📱 <b>Модель:</b> {DEFAULT_DEVICE_PROFILE['model_name']} ({DEFAULT_DEVICE_PROFILE['model']})\n"
+        f"🆔 <b>HWID:</b> <code>{DEFAULT_DEVICE_PROFILE['hwid']}</code>\n"
+        f"⚙️ <b>Система:</b> {DEFAULT_DEVICE_PROFILE['os']} {DEFAULT_DEVICE_PROFILE['ver_os']}\n"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_device_action_success_keyboard(has_sub=has_sub),
+        parse_mode="HTML",
+    )
+    await callback.answer("Сброшено на стандартные настройки.")
+
+
+# Обновление подписки прямо из настроек устройства
+@router.callback_query(F.data == "dev_refresh_sub")
+async def callback_dev_refresh_sub(callback: CallbackQuery):
+    db: Database = callback.bot.db
+    user_data = await db.get_user_subscription(callback.from_user.id)
+
+    if not user_data or not user_data.get("subscription_url"):
+        await callback.answer("У вас ещё нет сохранённой подписки. Добавьте её в главном меню.", show_alert=True)
+        return
+
+    sub_url = user_data["subscription_url"]
+    status_msg = await callback.message.answer("⏳ <i>Обновляю подписку от провайдера с вашим HWID...</i>", parse_mode="HTML")
+
+    profile = await db.get_user_device_profile(callback.from_user.id)
+    headers = build_headers_from_profile(profile)
+
+    try:
+        servers, raw_content = await fetch_and_parse_subscription(sub_url, headers=headers)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ <b>Ошибка при обновлении:</b>\n{html.escape(str(e))}", parse_mode="HTML")
+        await callback.answer()
+        return
+
+    await db.save_user_subscription(
+        user_id=callback.from_user.id,
+        subscription_url=sub_url,
+        servers=servers,
+        raw_content=raw_content,
+    )
+
+    await status_msg.delete()
+    text = (
+        f"🔄 <b>Подписка успешно обновлена!</b>\n"
+        f"🆔 Использован HWID: <code>{html.escape(profile.get('hwid', ''))}</code>\n"
+        f"📡 Доступно серверов: <b>{len(servers)}</b>\n\n"
+        "👇 Выберите сервер, чтобы скопировать ссылку или получить QR-код:"
+    )
+    await callback.message.answer(
+        text,
+        reply_markup=get_servers_inline_keyboard(servers, page=0),
+        parse_mode="HTML",
+    )
+    await callback.answer("Подписка обновлена!")
+
+
+# Инструкция по подключению клиентов
+@router.message(F.text == "📖 Как подключить")
 @router.message(F.text == "📱 Настройка телефона")
 @router.message(Command("phone"))
 @router.message(Command("setup"))
+@router.message(Command("connect"))
 async def show_phone_setup(message: Message):
     text = (
-        "📱 <b>Настройка подключения на телефоне</b>\n\n"
+        "📖 <b>Инструкция по подключению на смартфоне</b>\n\n"
         "Подключить телефон можно двумя основными способами:\n\n"
-        "1️⃣ <b>По QR-коду или ссылке на сервер</b> — выберите сервер в списке, нажмите «📷 QR-код» и отсканируйте камерой приложения.\n"
+        "1️⃣ <b>По QR-коду или ссылке на сервер</b> — выберите сервер в списке бота, нажмите «📷 QR-код» и отсканируйте камерой приложения.\n"
         "2️⃣ <b>По ссылке на всю подписку</b> — добавьте ссылку подписки в приложение, чтобы все серверы обновлялись автоматически.\n\n"
         "👇 <b>Выберите вашу операционную систему:</b>"
     )

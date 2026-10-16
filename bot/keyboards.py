@@ -16,7 +16,10 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="🔄 Обновить ссылки"),
         ],
         [
-            KeyboardButton(text="📱 Настройка телефона"),
+            KeyboardButton(text="📱 Настройки телефона и HWID"),
+            KeyboardButton(text="📖 Как подключить"),
+        ],
+        [
             KeyboardButton(text="🦊 Sing-Box → VLESS"),
         ],
     ]
@@ -323,4 +326,112 @@ def get_phone_app_back_keyboard(os_name: str, back_srv: str = "none") -> InlineK
             ]
         ]
     )
+
+
+# Клавиатура главного меню настроек устройства и HWID
+def get_device_settings_keyboard(has_sub: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="🎲 Сгенерировать новый HWID", callback_data="dev_gen_hwid")
+        ],
+        [
+            InlineKeyboardButton(text="📱 Сменить модель телефона", callback_data="dev_choose_model"),
+            InlineKeyboardButton(text="✏️ Ввести свой HWID", callback_data="dev_input_hwid"),
+        ],
+        [
+            InlineKeyboardButton(text="ℹ️ Как узнать HWID своего смартфона?", callback_data="dev_hwid_info")
+        ],
+    ]
+    if has_sub:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить серверы с этим HWID", callback_data="dev_refresh_sub"
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔄 Сбросить на стандартные", callback_data="dev_reset_default"),
+            InlineKeyboardButton(text="❌ Закрыть", callback_data="delete_msg"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# Выбор модели телефона (пресетов)
+def get_device_models_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🍏 Apple iPhone 15 Pro (iOS 18)",
+                    callback_data="dev_set_model:iphone_15",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 Samsung Galaxy S24 Ultra (Android 15)",
+                    callback_data="dev_set_model:samsung_s24",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 Google Pixel 8 Pro (Android 14)",
+                    callback_data="dev_set_model:pixel_8",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 Honor Magic 6 Pro (Android 15)",
+                    callback_data="dev_set_model:honor_magic6",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Назад в настройки", callback_data="dev_back")
+            ],
+        ]
+    )
+
+
+# Клавиатура после смены HWID или модели
+def get_device_action_success_keyboard(has_sub: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if has_sub:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить серверы прямо сейчас",
+                    callback_data="dev_refresh_sub",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📱 Вернуться в настройки телефона",
+                callback_data="dev_back",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# Кнопка отмены ввода HWID
+def get_cancel_hwid_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_hwid_input")]
+        ]
+    )
+
+
+# Кнопка возврата из справки по HWID
+def get_device_info_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад в настройки", callback_data="dev_back")]
+        ]
+    )
+
 

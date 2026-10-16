@@ -27,8 +27,9 @@ def clean_subscription_url(raw_url: str) -> str:
     return url
 
 
-def _fetch_sync(url: str) -> bytes:
-    req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
+def _fetch_sync(url: str, headers: dict = None) -> bytes:
+    req_headers = headers if headers else DEFAULT_HEADERS
+    req = urllib.request.Request(url, headers=req_headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             content_encoding = resp.headers.get("Content-Encoding", "").lower()
@@ -47,10 +48,10 @@ def _fetch_sync(url: str) -> bytes:
         raise ValueError(f"Не удалось получить подписку: {e}")
 
 
-async def fetch_and_parse_subscription(url: str) -> Tuple[List[Dict], str]:
+async def fetch_and_parse_subscription(url: str, headers: dict = None) -> Tuple[List[Dict], str]:
     clean_url = clean_subscription_url(url)
     
-    raw_bytes = await asyncio.to_thread(_fetch_sync, clean_url)
+    raw_bytes = await asyncio.to_thread(_fetch_sync, clean_url, headers)
 
     text_content = ""
     # Попытка Base64 декодирования
