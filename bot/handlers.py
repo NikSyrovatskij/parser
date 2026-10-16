@@ -8,6 +8,7 @@ import html
 
 from .database import Database
 from .parser import fetch_and_parse_subscription, clean_subscription_url
+from .qr import generate_qr_code
 from .keyboards import (
     get_main_menu_keyboard,
     get_cancel_keyboard,
@@ -15,6 +16,10 @@ from .keyboards import (
     get_single_link_keyboard,
     get_servers_inline_keyboard,
     get_server_detail_keyboard,
+    get_qr_detail_keyboard,
+    get_phone_setup_menu_keyboard,
+    get_phone_os_keyboard,
+    get_phone_app_back_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,8 @@ async def cmd_start(message: Message, state: FSMContext):
         "📌 <b>Возможности:</b>\n"
         "• <b>📥 Вставить ссылку подписки</b> — спарсить подписку и сохранить\n"
         "• <b>📋 Посмотреть ссылки</b> — открыть список серверов и скопировать в 1 клик\n"
+        "• <b>📷 QR-коды</b> — мгновенный импорт любого сервера в телефон через камеру\n"
+        "• <b>📱 Настройка телефона</b> — пошаговый мастер подключения для iOS и Android\n"
         "• <b>🔄 Обновить ссылки</b> — повторно загрузить актуальные серверы\n\n"
         "Выберите действие в меню ниже 👇"
     )
@@ -60,12 +67,14 @@ async def cmd_help(message: Message):
         "📖 <b>Справка по использованию:</b>\n\n"
         "1. Нажмите <b>«📥 Вставить ссылку подписки»</b> и отправьте ссылку вида <code>https://...</code> или <code>happ://add/...</code>\n"
         "2. Бот автоматически эмулирует клиент, снимет шифрование и выдаст список серверов с кнопками.\n"
-        "3. Нажмите на любой сервер, чтобы скопировать ссылку VLESS/Hysteria.\n"
-        "4. Чтобы получить все серверы разом, используйте кнопку <b>«📁 Скачать все ссылки (.txt)»</b> под списком.\n\n"
+        "3. Нажмите на любой сервер, чтобы скопировать ссылку VLESS/Hysteria или получить <b>📷 QR-код</b> для телефона.\n"
+        "4. Чтобы настроить приложение на смартфоне, нажмите <b>«📱 Настройка телефона»</b>.\n"
+        "5. Чтобы получить все серверы разом, используйте кнопку <b>«📁 Скачать все ссылки (.txt)»</b> под списком.\n\n"
         "Команды:\n"
         "/start — Главное меню\n"
         "/subscribe — Вставить ссылку\n"
         "/servers — Посмотреть серверы\n"
+        "/phone — Настройка телефона (iOS / Android)\n"
         "/refresh — Обновить подписку"
     )
     await message.answer(help_text, parse_mode="HTML")
@@ -259,6 +268,273 @@ async def callback_server_detail(callback: CallbackQuery):
     await callback.message.edit_text(
         detail_text,
         reply_markup=get_server_detail_keyboard(target_srv, page=page),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Показ QR-кода выбранного сервера
+@router.callback_query(F.data.startswith("qr:"))
+async def callback_server_qr(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    srv_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
+
+    db: Database = callback.bot.db
+    user_data = await db.get_user_subscription(callback.from_user.id)
+    if not user_data:
+        await callback.answer("Подписка не найдена.", show_alert=True)
+        return
+
+    target_srv = next((s for s in user_data["servers"] if s["id"] == srv_id), None)
+    if not target_srv:
+        await callback.answer("Сервер не найден.", show_alert=True)
+        return
+
+    try:
+        qr_bytes = generate_qr_code(target_srv["link"])
+    except Exception as e:
+        logger.error(f"Ошибка при генерации QR-кода: {e}")
+        await callback.answer("Не удалось сгенерировать QR-код.", show_alert=True)
+        return
+
+    photo = BufferedInputFile(qr_bytes, filename=f"qr_server_{srv_id + 1}.png")
+    title_safe = html.escape(target_srv["title"])
+    proto_safe = html.escape(target_srv["proto"].upper())
+
+    caption = (
+        f"📷 <b>QR-код для подключения</b>\n"
+        f"📡 <b>Сервер:</b> {title_safe}\n"
+        f"⚙️ <b>Протокол:</b> <code>{proto_safe}</code>\n\n"
+        f"📱 <i>Отсканируйте камерой приложения на телефоне:</i>\n"
+        f"• <b>iOS:</b> Happ, Streisand, FoXray, V2Box\n"
+        f"• <b>Android:</b> Happ, v2rayNG, Hiddify, NekoBox"
+    )
+
+    await callback.message.answer_photo(
+        photo=photo,
+        caption=caption,
+        reply_markup=get_qr_detail_keyboard(target_srv["link"]),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Удаление сервисного сообщения (например, скрытие QR-кода)
+@router.callback_query(F.data == "delete_msg")
+async def callback_delete_msg(callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        await callback.answer("Не удалось удалить сообщение.")
+        return
+    await callback.answer()
+
+
+# Переход в меню настройки телефона из выбранного сервера
+@router.callback_query(F.data.startswith("phone_setup_from_srv:"))
+async def callback_phone_setup_from_srv(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    srv_id = parts[1]
+    page = parts[2]
+    back_srv = f"{srv_id}:{page}"
+
+    text = (
+        "📱 <b>Настройка подключения на телефоне</b>\n\n"
+        "Подключить телефон можно двумя основными способами:\n\n"
+        "1️⃣ <b>По QR-коду или ссылке на сервер</b> — нажмите «📷 QR-код» у сервера и отсканируйте его камерой приложения.\n"
+        "2️⃣ <b>По ссылке на всю подписку</b> — добавьте ссылку подписки в приложение, чтобы все серверы обновлялись автоматически.\n\n"
+        "👇 <b>Выберите вашу операционную систему:</b>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_phone_setup_menu_keyboard(back_srv=back_srv),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Главное меню настройки телефона из общего меню
+@router.message(F.text == "📱 Настройка телефона")
+@router.message(Command("phone"))
+@router.message(Command("setup"))
+async def show_phone_setup(message: Message):
+    text = (
+        "📱 <b>Настройка подключения на телефоне</b>\n\n"
+        "Подключить телефон можно двумя основными способами:\n\n"
+        "1️⃣ <b>По QR-коду или ссылке на сервер</b> — выберите сервер в списке, нажмите «📷 QR-код» и отсканируйте камерой приложения.\n"
+        "2️⃣ <b>По ссылке на всю подписку</b> — добавьте ссылку подписки в приложение, чтобы все серверы обновлялись автоматически.\n\n"
+        "👇 <b>Выберите вашу операционную систему:</b>"
+    )
+    await message.answer(
+        text,
+        reply_markup=get_phone_setup_menu_keyboard(back_srv="none"),
+        parse_mode="HTML",
+    )
+
+
+# Возврат в меню настройки телефона
+@router.callback_query(F.data.startswith("phone_menu:"))
+async def callback_phone_menu(callback: CallbackQuery):
+    back_srv = callback.data.split(":", 1)[1]
+    text = (
+        "📱 <b>Настройка подключения на телефоне</b>\n\n"
+        "👇 <b>Выберите вашу операционную систему:</b>"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_phone_setup_menu_keyboard(back_srv=back_srv),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Выбор ОС (iOS или Android)
+@router.callback_query(F.data.startswith("phone_os:"))
+async def callback_phone_os(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    os_name = parts[1]
+    back_srv = parts[2] if len(parts) > 2 else "none"
+
+    if os_name == "ios":
+        text = (
+            "🍏 <b>Приложения для iPhone / iPad (iOS):</b>\n\n"
+            "1️⃣ <b>Happ Proxy</b> — официальный клиент Happ. Нативная поддержка защищённых подписок.\n"
+            "2️⃣ <b>Streisand</b> — один из лучших и удобных клиентов под iOS (VLESS, Hysteria, Reality, QR-код).\n"
+            "3️⃣ <b>V2Box / FoXray</b> — альтернативные клиенты с мощной маршрутизацией.\n\n"
+            "👇 <i>Нажмите на приложение, чтобы открыть пошаговую инструкцию:</i>"
+        )
+    else:
+        text = (
+            "🤖 <b>Приложения для Android:</b>\n\n"
+            "1️⃣ <b>Happ Proxy</b> — официальный клиент с поддержкой подписок Happ.\n"
+            "2️⃣ <b>v2rayNG</b> — стандарт индустрии на Android (быстрый, стабильный, импорт по QR и ссылкам).\n"
+            "3️⃣ <b>Hiddify / NekoBox</b> — современные универсальные клиенты на ядре Sing-box.\n\n"
+            "👇 <i>Нажмите на приложение, чтобы открыть пошаговую инструкцию:</i>"
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_phone_os_keyboard(os_name=os_name, back_srv=back_srv),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Подробная инструкция по конкретному приложению
+@router.callback_query(F.data.startswith("phone_app:"))
+async def callback_phone_app(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    app_key = parts[1]
+    back_srv = parts[2] if len(parts) > 2 else "none"
+
+    os_name = "ios" if app_key.startswith("ios_") else "android"
+
+    instructions = {
+        "ios_happ": (
+            "🍏 <b>Инструкция для Happ Proxy (iOS):</b>\n\n"
+            "1. Установите <b>Happ Proxy Utility</b> из App Store.\n"
+            "2. <b>Подключение по ссылке подписки:</b>\n"
+            "   • Скопируйте ссылку вашей подписки (раздел «🔗 Подключение по ссылке»).\n"
+            "   • Откройте Happ — приложение автоматически предложит импортировать ссылку из буфера.\n"
+            "3. <b>Подключение через QR-код:</b>\n"
+            "   • Выберите сервер в списке бота → нажмите <b>«📷 QR-код»</b>.\n"
+            "   • В Happ нажмите <b>«+»</b> → <b>«Scan QR Code»</b>.\n"
+            "4. Выберите нужную локацию и нажмите кнопку включения."
+        ),
+        "ios_streisand": (
+            "🍏 <b>Инструкция для Streisand (iOS):</b>\n\n"
+            "1. Установите <b>Streisand</b> из App Store.\n"
+            "2. <b>Способ 1 — QR-код (самый быстрый):</b>\n"
+            "   • В боте выберите сервер → нажмите <b>«📷 QR-код»</b>.\n"
+            "   • В Streisand нажмите <b>«+»</b> в правом верхнем углу → <b>«Scan QR Code»</b>.\n"
+            "   • Конфигурация моментально добавится.\n"
+            "3. <b>Способ 2 — Через буфер обмена:</b>\n"
+            "   • Нажмите <b>«📋 Скопировать»</b> у сервера в боте.\n"
+            "   • В Streisand нажмите <b>«+»</b> → <b>«Import from Clipboard»</b>.\n"
+            "4. <b>Способ 3 — Все серверы разом:</b>\n"
+            "   • Скачайте файл <b>«📁 Все ссылки (.txt)»</b> из бота и откройте через «Поделиться» → Streisand."
+        ),
+        "ios_v2box": (
+            "🍏 <b>Инструкция для V2Box / FoXray (iOS):</b>\n\n"
+            "1. Установите <b>V2Box</b> или <b>FoXray</b> из App Store.\n"
+            "2. <b>Подключение сервера:</b>\n"
+            "   • Нажмите <b>«📷 QR-код»</b> у сервера в боте и отсканируйте через значок камеры в V2Box.\n"
+            "   • Либо скопируйте VLESS-ссылку и нажмите <b>«+» → «Import V2ray from Clipboard»</b>.\n"
+            "3. Нажмите кнопку <b>«Slide to connect»</b>."
+        ),
+        "and_happ": (
+            "🤖 <b>Инструкция для Happ Proxy (Android):</b>\n\n"
+            "1. Установите клиент <b>Happ</b> на ваш Android-смартфон.\n"
+            "2. <b>Подключение по ссылке:</b>\n"
+            "   • Скопируйте ссылку подписки в боте.\n"
+            "   • В приложении Happ нажмите <b>«+»</b> → <b>«Add subscription»</b> и вставьте ссылку.\n"
+            "3. <b>Подключение через QR:</b>\n"
+            "   • В боте выберите сервер → <b>«📷 QR-код»</b>.\n"
+            "   • В Happ нажмите <b>«+» → «Scan QR»</b>.\n"
+            "4. Нажмите круглую кнопку подключения."
+        ),
+        "and_v2rayng": (
+            "🤖 <b>Инструкция для v2rayNG (Android):</b>\n\n"
+            "1. Установите <b>v2rayNG</b> из Google Play или с GitHub.\n"
+            "2. <b>Способ через QR-код:</b>\n"
+            "   • В боте выберите сервер → <b>«📷 QR-код»</b>.\n"
+            "   • В v2rayNG нажмите <b>«+»</b> вверху экрана → <b>«Сканировать QR-код»</b>.\n"
+            "3. <b>Способ через буфер:</b>\n"
+            "   • В боте нажмите <b>«📋 Скопировать»</b> у сервера.\n"
+            "   • В v2rayNG нажмите <b>«+» → «Импортировать профиль из буфера обмена»</b>.\n"
+            "4. Нажмите значок <b>V</b> в правом нижнем углу для включения."
+        ),
+        "and_hiddify": (
+            "🤖 <b>Инструкция для Hiddify / NekoBox (Android):</b>\n\n"
+            "1. Установите <b>Hiddify</b> из Google Play или GitHub.\n"
+            "2. <b>Быстрое добавление:</b>\n"
+            "   • Скопируйте ссылку сервера или отсканируйте QR-код через значок сканера на главном экране.\n"
+            "3. Нажмите большую круглую кнопку подключения по центру."
+        ),
+    }
+
+    text = instructions.get(app_key, "Инструкция временно недоступна.")
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_phone_app_back_keyboard(os_name=os_name, back_srv=back_srv),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# Информация о подключении всей подписки по ссылке
+@router.callback_query(F.data.startswith("phone_sub_info:"))
+async def callback_phone_sub_info(callback: CallbackQuery):
+    back_srv = callback.data.split(":", 1)[1]
+    db: Database = callback.bot.db
+    user_data = await db.get_user_subscription(callback.from_user.id)
+
+    sub_url = user_data.get("subscription_url") if user_data else None
+
+    if sub_url:
+        sub_safe = html.escape(sub_url)
+        text = (
+            "🔗 <b>Подключение всей подписки по ссылке</b>\n\n"
+            "Ваша сохранённая ссылка подписки:\n"
+            f"<code>{sub_safe}</code>\n\n"
+            "💡 <b>Как это работает на телефоне:</b>\n"
+            "• В приложении (<b>Happ</b>, <b>v2rayNG</b> и др.) откройте раздел <i>«Подписки» (Subscription Groups)</i>.\n"
+            "• Добавьте эту ссылку и нажмите <i>«Обновить подписки»</i>.\n"
+            "• Все серверы скачаются автоматически и будут сами обновляться по расписанию!\n\n"
+            "⚠️ <i>Примечание: если провайдер Happ блокирует прямые запросы от сторонних клиентов (ошибка 403), используйте приложение Happ, либо импортируйте конкретные серверы через QR-код / TXT файл из бота.</i>"
+        )
+    else:
+        text = (
+            "🔗 <b>Подключение всей подписки по ссылке</b>\n\n"
+            "У вас ещё не сохранена ссылка на подписку.\n\n"
+            "Нажмите <b>«📥 Вставить ссылку подписки»</b> в главном меню, чтобы добавить её.\n"
+            "После добавления бот расшифрует серверы и выдаст готовые конфигурации для любых приложений."
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_phone_setup_menu_keyboard(back_srv=back_srv),
         parse_mode="HTML",
     )
     await callback.answer()
