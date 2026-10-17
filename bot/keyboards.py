@@ -51,7 +51,7 @@ def get_cancel_singbox_keyboard() -> InlineKeyboardMarkup:
 
 def get_single_link_keyboard(link: str) -> InlineKeyboardMarkup:
     rows = []
-    if len(link) <= 1024:
+    if len(link) <= 256:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -146,7 +146,7 @@ def get_server_detail_keyboard(server: dict, page: int) -> InlineKeyboardMarkup:
 
     # Кнопки быстрого подключения: Копирование и QR-код
     action_row = []
-    if len(link) <= 1024:
+    if len(link) <= 256:
         action_row.append(
             InlineKeyboardButton(
                 text="📋 Скопировать",
@@ -200,7 +200,7 @@ def get_server_detail_keyboard(server: dict, page: int) -> InlineKeyboardMarkup:
 # Клавиатура под отправленным QR-кодом
 def get_qr_detail_keyboard(link: str) -> InlineKeyboardMarkup:
     rows = []
-    if len(link) <= 1024:
+    if len(link) <= 256:
         rows.append(
             [
                 InlineKeyboardButton(
